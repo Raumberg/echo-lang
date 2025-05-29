@@ -274,28 +274,14 @@ ASTNode* parse_unary(Parser* parser) {
     return parse_postfix(parser);
 }
 
-// Parse postfix expressions (:: . [] ())
+// Parse postfix expressions (function calls, member access, scope resolution)
 ASTNode* parse_postfix(Parser* parser) {
     ASTNode* expr = parse_primary(parser);
     if (!expr) return NULL;
     
     while (true) {
-        // Postfix increment/decrement
-        if (parser_check(parser, TOKEN_OPERATOR) && 
-            parser->current_token.value && 
-            (strcmp(parser->current_token.value, "++") == 0 || 
-             strcmp(parser->current_token.value, "--") == 0)) {
-            
-            char* op = strdup(parser->current_token.value);
-            parser_advance(parser);
-            
-            ASTNode* postfix = ast_create_unary_op(op, expr);
-            postfix->type = AST_UNARY_OP; // Mark as postfix
-            free(op);
-            expr = postfix;
-        }
         // Scope resolution ::
-        else if (parser_check(parser, TOKEN_OPERATOR) && 
+        if (parser_check(parser, TOKEN_OPERATOR) && 
             parser->current_token.value && strcmp(parser->current_token.value, "::") == 0) {
             parser_advance(parser);
             
@@ -314,13 +300,125 @@ ASTNode* parse_postfix(Parser* parser) {
             ast_add_child(scope_res, right);
             expr = scope_res;
         }
-        // Function call
+        // Function calls (expr(...))
         else if (parser_check(parser, TOKEN_DELIMITER) && 
-                 parser->current_token.value && strcmp(parser->current_token.value, "(") == 0) {
+            parser->current_token.value && strcmp(parser->current_token.value, "(") == 0) {
             expr = parse_call(parser, expr);
             if (!expr) return NULL;
         }
-        // Member access . (TODO: implement later)
+        // Named struct literals (TypeName {field: value})
+        else if (expr->type == AST_IDENTIFIER && 
+                 parser_check(parser, TOKEN_DELIMITER) && 
+                 parser->current_token.value && strcmp(parser->current_token.value, "{") == 0) {
+            parser_advance(parser); // consume '{'
+            
+            ASTNode* struct_literal = ast_create_node(AST_STRUCT_LITERAL, expr->value);
+            ast_set_position(struct_literal, parser->current_token.line, parser->current_token.column);
+            
+            // Parse field initializers
+            if (!parser_check(parser, TOKEN_DELIMITER) || 
+                strcmp(parser->current_token.value, "}") != 0) {
+                
+                do {
+                    // Parse field name
+                    if (!parser_check(parser, TOKEN_IDENTIFIER)) {
+                        parser_error(parser, "Expected field name in struct literal");
+                        ast_destroy(struct_literal);
+                        ast_destroy(expr);
+                        return NULL;
+                    }
+                    
+                    ASTNode* field_name = ast_create_identifier(parser->current_token.value);
+                    ast_set_position(field_name, parser->current_token.line, parser->current_token.column);
+                    parser_advance(parser);
+                    
+                    // Expect colon
+                    if (!parser_check(parser, TOKEN_OPERATOR) || 
+                        !parser->current_token.value || strcmp(parser->current_token.value, ":") != 0) {
+                        parser_error(parser, "Expected ':' after field name in struct literal");
+                        ast_destroy(field_name);
+                        ast_destroy(struct_literal);
+                        ast_destroy(expr);
+                        return NULL;
+                    }
+                    parser_advance(parser);
+                    
+                    // Parse field value
+                    ASTNode* field_value = parse_expression(parser);
+                    if (!field_value) {
+                        ast_destroy(field_name);
+                        ast_destroy(struct_literal);
+                        ast_destroy(expr);
+                        return NULL;
+                    }
+                    
+                    // Create field initializer node
+                    ASTNode* field_init = ast_create_node(AST_ASSIGNMENT, ":");
+                    ast_add_child(field_init, field_name);
+                    ast_add_child(field_init, field_value);
+                    ast_add_child(struct_literal, field_init);
+                    
+                    // Check for comma
+                    if (parser_check(parser, TOKEN_DELIMITER) && 
+                        parser->current_token.value && strcmp(parser->current_token.value, ",") == 0) {
+                        parser_advance(parser);
+                        continue;
+                    } else {
+                        break;
+                    }
+                } while (true);
+            }
+            
+            // Expect closing brace
+            if (!parser_expect(parser, TOKEN_DELIMITER, "Expected '}' after struct literal")) {
+                ast_destroy(struct_literal);
+                ast_destroy(expr);
+                return NULL;
+            }
+            
+            ast_destroy(expr); // free the identifier since we consumed it
+            expr = struct_literal;
+        }
+        // Member access with dot (obj.field)
+        else if (parser_check(parser, TOKEN_OPERATOR) && 
+                 parser->current_token.value && strcmp(parser->current_token.value, ".") == 0) {
+            parser_advance(parser);
+            
+            if (!parser_check(parser, TOKEN_IDENTIFIER)) {
+                parser_error(parser, "Expected field name after '.'");
+                ast_destroy(expr);
+                return NULL;
+            }
+            
+            ASTNode* field = ast_create_identifier(parser->current_token.value);
+            ast_set_position(field, parser->current_token.line, parser->current_token.column);
+            parser_advance(parser);
+            
+            ASTNode* member_access = ast_create_node(AST_MEMBER_ACCESS, ".");
+            ast_add_child(member_access, expr);
+            ast_add_child(member_access, field);
+            expr = member_access;
+        }
+        // Pointer member access (ptr->field)
+        else if (parser_check(parser, TOKEN_OPERATOR) && 
+                 parser->current_token.value && strcmp(parser->current_token.value, "->") == 0) {
+            parser_advance(parser);
+            
+            if (!parser_check(parser, TOKEN_IDENTIFIER)) {
+                parser_error(parser, "Expected field name after '->'");
+                ast_destroy(expr);
+                return NULL;
+            }
+            
+            ASTNode* field = ast_create_identifier(parser->current_token.value);
+            ast_set_position(field, parser->current_token.line, parser->current_token.column);
+            parser_advance(parser);
+            
+            ASTNode* member_access = ast_create_node(AST_MEMBER_ACCESS, "->");
+            ast_add_child(member_access, expr);
+            ast_add_child(member_access, field);
+            expr = member_access;
+        }
         // Array access [] (TODO: implement later)
         else {
             break;
@@ -406,7 +504,76 @@ ASTNode* parse_primary(Parser* parser) {
         return expr;
     }
     
+    // Struct literals: {field: value, field2: value2}
+    if (parser_check(parser, TOKEN_DELIMITER) && 
+        parser->current_token.value && strcmp(parser->current_token.value, "{") == 0) {
+        parser_advance(parser);
+        
+        ASTNode* struct_literal = ast_create_node(AST_STRUCT_LITERAL, NULL);
+        ast_set_position(struct_literal, parser->current_token.line, parser->current_token.column);
+        
+        // Parse field initializers
+        if (!parser_check(parser, TOKEN_DELIMITER) || 
+            strcmp(parser->current_token.value, "}") != 0) {
+            
+            do {
+                // Parse field name
+                if (!parser_check(parser, TOKEN_IDENTIFIER)) {
+                    parser_error(parser, "Expected field name in struct literal");
+                    ast_destroy(struct_literal);
+                    return NULL;
+                }
+                
+                ASTNode* field_name = ast_create_identifier(parser->current_token.value);
+                ast_set_position(field_name, parser->current_token.line, parser->current_token.column);
+                parser_advance(parser);
+                
+                // Expect colon
+                if (!parser_check(parser, TOKEN_OPERATOR) || 
+                    !parser->current_token.value || strcmp(parser->current_token.value, ":") != 0) {
+                    parser_error(parser, "Expected ':' after field name in struct literal");
+                    ast_destroy(field_name);
+                    ast_destroy(struct_literal);
+                    return NULL;
+                }
+                parser_advance(parser);
+                
+                // Parse field value
+                ASTNode* field_value = parse_expression(parser);
+                if (!field_value) {
+                    ast_destroy(field_name);
+                    ast_destroy(struct_literal);
+                    return NULL;
+                }
+                
+                // Create field initializer node
+                ASTNode* field_init = ast_create_node(AST_ASSIGNMENT, ":");
+                ast_add_child(field_init, field_name);
+                ast_add_child(field_init, field_value);
+                ast_add_child(struct_literal, field_init);
+                
+                // Check for comma
+                if (parser_check(parser, TOKEN_DELIMITER) && 
+                    parser->current_token.value && strcmp(parser->current_token.value, ",") == 0) {
+                    parser_advance(parser);
+                    continue;
+                } else {
+                    break;
+                }
+            } while (true);
+        }
+        
+        // Expect closing brace
+        if (!parser_expect(parser, TOKEN_DELIMITER, "Expected '}' after struct literal")) {
+            ast_destroy(struct_literal);
+            return NULL;
+        }
+        
+        return struct_literal;
+    }
+    
     parser_error(parser, "Expected expression");
+    parser_advance(parser);
     return NULL;
 }
 

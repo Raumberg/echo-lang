@@ -120,11 +120,14 @@ Symbol* symbol_create(const char* name, SymbolType type, ASTNode* declaration, A
     symbol->name = strdup(name);
     symbol->type = type;
     symbol->declaration = declaration;
+    symbol->ast_node = declaration;  // Alias for declaration
     symbol->type_node = type_node;
+    symbol->c_function_name = NULL;  // Will be set for builtin functions
     symbol->scope_level = 0;
     symbol->is_initialized = false;
     symbol->is_used = false;
     symbol->is_parameter = (type == SYMBOL_PARAMETER);
+    symbol->is_builtin = false;
     symbol->next = NULL;
     
     return symbol;
@@ -135,6 +138,7 @@ void symbol_destroy(Symbol* symbol) {
     if (!symbol) return;
     
     free(symbol->name);
+    free(symbol->c_function_name);
     // Note: We don't destroy AST nodes here as they're owned by the AST
     free(symbol);
 }

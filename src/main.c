@@ -151,6 +151,9 @@ int main(int argc, char* argv[]) {
     // Set filename for error reporting
     semantic->current_filename = strdup(argv[1]);
     
+    // Add builtin modules and functions
+    semantic_add_builtin_modules(semantic);
+    
     bool semantic_ok = semantic_analyze(semantic, ast);
     
     if (!semantic_ok || semantic_has_errors(semantic)) {
@@ -195,7 +198,8 @@ int main(int argc, char* argv[]) {
     }
     
     // Create code generator
-    CodeGenerator* codegen = codegen_create(output_file, semantic->symbol_table);
+    CodeGenerator* codegen = codegen_create_with_inference(output_file, semantic->symbol_table, 
+                                                          semantic->type_inference);
     if (!codegen) {
         printf("Error: Failed to create code generator\n");
         fclose(output_file);

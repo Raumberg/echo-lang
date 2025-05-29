@@ -11,7 +11,9 @@ const char* ast_node_type_names[] = {
     "CALL", "IDENTIFIER", "LITERAL", "TYPE", "STRUCT", "ENUM",
     "ASSIGNMENT", "ARRAY_ACCESS", "MEMBER_ACCESS", "POINTER_DEREF",
     "ADDRESS_OF", "ALLOC", "DELETE", "PREPROCESSOR", "EXPRESSION_STMT",
-    "SCOPE_RESOLUTION"
+    "SCOPE_RESOLUTION", "STRUCT_LITERAL",
+    // Generics support
+    "AUTO_TYPE", "GENERIC_FUNCTION", "TEMPLATE_INSTANTIATION", "TYPE_PARAMETER"
 };
 
 // Create a new AST node
@@ -30,6 +32,15 @@ ASTNode* ast_create_node(ASTNodeType type, const char* value) {
     node->is_pointer = false;
     node->is_optional = false;
     node->is_array = false;
+    
+    // Initialize generics fields
+    node->is_generic = false;
+    node->is_auto = false;
+    node->type_parameters = NULL;
+    node->inferred_types = NULL;
+    node->type_param_count = 0;
+    node->generic_template = NULL;
+    node->instantiation_key = NULL;
     
     return node;
 }
@@ -129,9 +140,25 @@ void ast_destroy(ASTNode* node) {
         ast_destroy(node->children[i]);
     }
     
+    // Free generics memory
+    if (node->type_parameters) {
+        for (int i = 0; i < node->type_param_count; i++) {
+            free(node->type_parameters[i]);
+        }
+        free(node->type_parameters);
+    }
+    
+    if (node->inferred_types) {
+        for (int i = 0; i < node->type_param_count; i++) {
+            free(node->inferred_types[i]);
+        }
+        free(node->inferred_types);
+    }
+    
     // Free memory
     free(node->value);
     free(node->data_type);
+    free(node->instantiation_key);
     free(node->children);
     free(node);
 }
@@ -196,4 +223,111 @@ ASTNode* ast_get_child(ASTNode* node, int index) {
         return NULL;
     }
     return node->children[index];
+}
+
+// ================== GENERICS SUPPORT FUNCTIONS ==================
+
+// Create auto type node
+ASTNode* ast_create_auto_type(void) {
+    ASTNode* node = ast_create_node(AST_AUTO_TYPE, "auto");
+    if (node) {
+        node->is_auto = true;
+    }
+    return node;
+}
+
+// Create generic function node
+ASTNode* ast_create_generic_function(const char* name, ASTNode* type_params, ASTNode* params, 
+                                   ASTNode* return_type, ASTNode* body) {
+    ASTNode* node = ast_create_node(AST_GENERIC_FUNCTION, name);
+    if (!node) return NULL;
+    
+    node->is_generic = true;
+    
+    // Add type parameters, regular parameters, return type, and body as children
+    if (type_params) ast_add_child(node, type_params);
+    if (params) ast_add_child(node, params);
+    if (return_type) ast_add_child(node, return_type);
+    if (body) ast_add_child(node, body);
+    
+    return node;
+}
+
+// Create template instantiation
+ASTNode* ast_create_template_instantiation(ASTNode* generic_func, char** type_args, int type_count) {
+    if (!generic_func || !type_args) return NULL;
+    
+    ASTNode* node = ast_create_node(AST_TEMPLATE_INSTANTIATION, generic_func->value);
+    if (!node) return NULL;
+    
+    node->generic_template = generic_func;
+    
+    // Copy type arguments as inferred types
+    if (type_count > 0) {
+        node->inferred_types = malloc(type_count * sizeof(char*));
+        if (node->inferred_types) {
+            for (int i = 0; i < type_count; i++) {
+                node->inferred_types[i] = strdup(type_args[i]);
+            }
+            node->type_param_count = type_count;
+        }
+    }
+    
+    // Generate unique instantiation key
+    char* key = malloc(256);
+    if (key) {
+        strcpy(key, generic_func->value);
+        strcat(key, "<");
+        for (int i = 0; i < type_count; i++) {
+            if (i > 0) strcat(key, ",");
+            strcat(key, type_args[i]);
+        }
+        strcat(key, ">");
+        node->instantiation_key = key;
+    }
+    
+    return node;
+}
+
+// Mark node as generic
+void ast_mark_as_generic(ASTNode* node) {
+    if (node) {
+        node->is_generic = true;
+    }
+}
+
+// Add type parameter to node
+void ast_add_type_parameter(ASTNode* node, const char* type_name) {
+    if (!node || !type_name) return;
+    
+    // Resize type parameters array if needed
+    int new_count = node->type_param_count + 1;
+    char** new_params = realloc(node->type_parameters, new_count * sizeof(char*));
+    if (!new_params) return;
+    
+    new_params[node->type_param_count] = strdup(type_name);
+    node->type_parameters = new_params;
+    node->type_param_count = new_count;
+}
+
+// Set inferred types for instantiated template
+void ast_set_inferred_types(ASTNode* node, char** types, int count) {
+    if (!node || !types) return;
+    
+    // Free existing inferred types
+    if (node->inferred_types) {
+        for (int i = 0; i < node->type_param_count; i++) {
+            free(node->inferred_types[i]);
+        }
+        free(node->inferred_types);
+    }
+    
+    // Copy new types
+    node->inferred_types = malloc(count * sizeof(char*));
+    if (node->inferred_types) {
+        for (int i = 0; i < count; i++) {
+            node->inferred_types[i] = strdup(types[i]);
+        }
+        node->type_param_count = count;
+    }
 } 

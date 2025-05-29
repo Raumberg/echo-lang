@@ -6,19 +6,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include "echo_runtime.h"
 
 // Type definitions
 
 // Function declarations
-int32_t add(int32_t a, int32_t b);
-int32_t main(void);
+void main(void);
 
-int32_t add(int32_t a, int32_t b) {
-    return a + b;
-}
-
-int32_t main(void) {
-    int32_t result = add(10, 32);
-    return result;
+void main(void) {
+    echo_print_string("Hello, Echo Language!");
+    echo_print_string("Welcome to the future of systems programming!");
 }
 

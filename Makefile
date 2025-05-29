@@ -24,7 +24,7 @@ all: directories $(COMPILER)
 # Create necessary directories
 directories:
 	@mkdir -p $(OBJDIR) $(BINDIR)
-	@mkdir -p $(OBJDIR)/lexer $(OBJDIR)/parser $(OBJDIR)/ast $(OBJDIR)/semantic $(OBJDIR)/codegen $(OBJDIR)/utils
+	@mkdir -p $(OBJDIR)/lexer $(OBJDIR)/parser $(OBJDIR)/ast $(OBJDIR)/semantic $(OBJDIR)/codegen $(OBJDIR)/utils $(OBJDIR)/runtime
 
 # Build main compiler
 $(COMPILER): $(OBJECTS)

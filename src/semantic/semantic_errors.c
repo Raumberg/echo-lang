@@ -13,6 +13,7 @@ const char* semantic_error_messages[] = {
     [SEMANTIC_ERROR_INCOMPATIBLE_TYPES] = "Incompatible types",
     [SEMANTIC_ERROR_INVALID_OPERATION] = "Invalid operation for type",
     [SEMANTIC_ERROR_INVALID_CAST] = "Invalid type cast",
+    [SEMANTIC_ERROR_UNDEFINED_FIELD] = "Undefined field in struct",
     
     // Symbol errors
     [SEMANTIC_ERROR_UNDEFINED_SYMBOL] = "Undefined symbol",

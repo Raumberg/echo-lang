@@ -19,11 +19,14 @@ typedef struct Symbol {
     char* name;
     SymbolType type;
     ASTNode* declaration;      // AST node where symbol is declared
+    ASTNode* ast_node;         // Alias for declaration (for generics compatibility)
     ASTNode* type_node;        // Type information
+    char* c_function_name;     // C function name for builtin functions
     int scope_level;
     bool is_initialized;
     bool is_used;
     bool is_parameter;
+    bool is_builtin;           // True if this is a builtin symbol
     struct Symbol* next;       // For hash table chaining
 } Symbol;
 

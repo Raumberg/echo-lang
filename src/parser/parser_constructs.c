@@ -31,10 +31,7 @@ ASTNode* parse_program(Parser* parser) {
             if (kw && strcmp(kw, "fn") == 0) {
                 decl = parse_function(parser);
             } else if (kw && strcmp(kw, "struct") == 0) {
-                // TODO: implement struct parsing
-                parser_error(parser, "Struct parsing not implemented yet");
-                parser_synchronize(parser);
-                continue;
+                decl = parse_struct(parser);
             } else if (kw && strcmp(kw, "enum") == 0) {
                 // TODO: implement enum parsing
                 parser_error(parser, "Enum parsing not implemented yet");
@@ -90,6 +87,7 @@ ASTNode* parse_function(Parser* parser) {
     }
     
     ASTNode* params = ast_create_node(AST_PARAMETER, NULL);
+    bool has_auto_params = false;  // Track if function has generic parameters
     
     // Parse parameter list
     if (!parser_check(parser, TOKEN_DELIMITER) || 
@@ -102,6 +100,11 @@ ASTNode* parse_function(Parser* parser) {
                 ast_destroy(params);
                 ast_destroy(function);
                 return NULL;
+            }
+            
+            // Check if this parameter has auto type
+            if (param_type->type == AST_AUTO_TYPE) {
+                has_auto_params = true;
             }
             
             // Parse parameter name
@@ -140,15 +143,22 @@ ASTNode* parse_function(Parser* parser) {
     }
     
     // Return type
+    ASTNode* return_type = NULL;
     if (parser_check(parser, TOKEN_OPERATOR) && 
         parser->current_token.value && strcmp(parser->current_token.value, "->") == 0) {
         parser_advance(parser);
         
-        ASTNode* return_type = parse_type(parser);
+        return_type = parse_type(parser);
         if (!return_type) {
             ast_destroy(function);
             return NULL;
         }
+        
+        // Check if return type is auto
+        if (return_type->type == AST_AUTO_TYPE) {
+            has_auto_params = true;
+        }
+        
         ast_add_child(function, return_type);
     }
     
@@ -160,23 +170,114 @@ ASTNode* parse_function(Parser* parser) {
     }
     ast_add_child(function, body);
     
+    // Mark function as generic if it has auto parameters
+    if (has_auto_params) {
+        function->type = AST_GENERIC_FUNCTION;
+        ast_mark_as_generic(function);
+        printf("✓ Parsed generic function: %s\n", function->value);
+    }
+    
     return function;
+}
+
+// Parse struct declaration
+ASTNode* parse_struct(Parser* parser) {
+    if (!parser_expect_keyword(parser, "struct")) {
+        return NULL;
+    }
+    
+    // Struct name
+    if (!parser_check(parser, TOKEN_IDENTIFIER)) {
+        parser_error(parser, "Expected struct name");
+        return NULL;
+    }
+    
+    ASTNode* struct_node = ast_create_node(AST_STRUCT, parser->current_token.value);
+    ast_set_position(struct_node, parser->current_token.line, parser->current_token.column);
+    parser_advance(parser);
+    
+    // Opening brace
+    if (!parser_expect(parser, TOKEN_DELIMITER, "Expected '{' after struct name")) {
+        ast_destroy(struct_node);
+        return NULL;
+    }
+    
+    // Parse field declarations
+    while (!parser_check(parser, TOKEN_DELIMITER) || 
+           strcmp(parser->current_token.value, "}") != 0) {
+        
+        if (parser_check(parser, TOKEN_EOF)) {
+            parser_error(parser, "Unexpected end of file in struct");
+            ast_destroy(struct_node);
+            return NULL;
+        }
+        
+        // Parse field type
+        ASTNode* field_type = parse_type(parser);
+        if (!field_type) {
+            ast_destroy(struct_node);
+            return NULL;
+        }
+        
+        // Parse field name
+        if (!parser_check(parser, TOKEN_IDENTIFIER)) {
+            parser_error(parser, "Expected field name");
+            ast_destroy(field_type);
+            ast_destroy(struct_node);
+            return NULL;
+        }
+        
+        ASTNode* field = ast_create_node(AST_VARIABLE_DECL, parser->current_token.value);
+        ast_set_position(field, parser->current_token.line, parser->current_token.column);
+        ast_add_child(field, field_type);
+        ast_add_child(struct_node, field);
+        
+        parser_advance(parser);
+        
+        // Expect semicolon after field
+        if (!parser_expect(parser, TOKEN_DELIMITER, "Expected ';' after struct field")) {
+            ast_destroy(struct_node);
+            return NULL;
+        }
+    }
+    
+    // Closing brace
+    if (!parser_expect(parser, TOKEN_DELIMITER, "Expected '}' after struct body")) {
+        ast_destroy(struct_node);
+        return NULL;
+    }
+    
+    return struct_node;
 }
 
 // Parse type
 ASTNode* parse_type(Parser* parser) {
-    if (!parser_check(parser, TOKEN_KEYWORD)) {
+    const char* type_name = NULL;
+    ASTNode* type_node = NULL;
+    
+    // Handle 'auto' keyword specifically
+    if (parser_check(parser, TOKEN_KEYWORD) && 
+        parser->current_token.value && strcmp(parser->current_token.value, "auto") == 0) {
+        type_node = ast_create_auto_type();
+        ast_set_position(type_node, parser->current_token.line, parser->current_token.column);
+        parser_advance(parser);
+        return type_node;
+    }
+    
+    // Check for built-in type keywords
+    if (parser_check(parser, TOKEN_KEYWORD) && is_type_keyword(parser->current_token.value)) {
+        type_name = parser->current_token.value;
+    }
+    // Check for user-defined types (identifiers like struct names)
+    else if (parser_check(parser, TOKEN_IDENTIFIER)) {
+        type_name = parser->current_token.value;
+    }
+    else {
         parser_error(parser, "Expected type");
         return NULL;
     }
     
-    const char* type_name = parser->current_token.value;
-    if (!is_type_keyword(type_name)) {
-        parser_error(parser, "Expected valid type");
-        return NULL;
-    }
-    
-    ASTNode* type_node = ast_create_node(AST_TYPE, type_name);
+    type_node = ast_create_node(AST_TYPE, type_name);
     ast_set_position(type_node, parser->current_token.line, parser->current_token.column);
     parser_advance(parser);
     
@@ -249,6 +350,14 @@ ASTNode* parse_statement(Parser* parser) {
         } else if (is_type_keyword(kw)) {
             return parse_variable_declaration(parser);
         }
+    }
+    
+    // Check for user-defined type variable declarations (e.g., "Point p = ...")
+    // Simple pattern check: IDENTIFIER IDENTIFIER (= | ;)
+    if (parser_check(parser, TOKEN_IDENTIFIER) && 
+        parser->peek_token.type == TOKEN_IDENTIFIER) {
+        // This looks like a variable declaration with user-defined type
+        return parse_variable_declaration(parser);
     }
     
     if (parser_check(parser, TOKEN_DELIMITER) && 

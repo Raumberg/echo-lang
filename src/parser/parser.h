@@ -25,6 +25,7 @@ ASTNode* parser_parse(Parser* parser);
 // Parsing functions for different constructs
 ASTNode* parse_program(Parser* parser);
 ASTNode* parse_function(Parser* parser);
+ASTNode* parse_struct(Parser* parser);
 ASTNode* parse_statement(Parser* parser);
 ASTNode* parse_expression(Parser* parser);
 ASTNode* parse_type(Parser* parser);

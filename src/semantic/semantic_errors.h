@@ -10,6 +10,9 @@ typedef enum {
     SEMANTIC_ERROR_INCOMPATIBLE_TYPES,
     SEMANTIC_ERROR_INVALID_OPERATION,
     SEMANTIC_ERROR_INVALID_CAST,
+    SEMANTIC_ERROR_UNDEFINED_FIELD,       // Field doesn't exist in struct
+    SEMANTIC_ERROR_UNDEFINED_TYPE,        // Type doesn't exist
+    SEMANTIC_ERROR_INVALID_AUTO_USAGE,    // auto used in invalid context (e.g., struct fields)
     
     // Symbol errors
     SEMANTIC_ERROR_UNDEFINED_SYMBOL,

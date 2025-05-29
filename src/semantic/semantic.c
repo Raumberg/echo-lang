@@ -1,10 +1,26 @@
 #define _GNU_SOURCE
 #include "semantic.h"
 #include "semantic_errors.h"
+#include "import_system.h"
+#include "type_inference.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+
+// Add builtin modules and functions using new import system
+void semantic_add_builtin_modules(SemanticContext* context) {
+    if (!context || !context->symbol_table) return;
+    
+    // Create import context
+    ImportContext* import_context = import_context_create(context->symbol_table);
+    if (!import_context) return;
+    
+    // Store import context in semantic context for later use
+    context->import_context = import_context;
+    
+    printf("✓ Import system initialized\n");
+}
 
 // Create semantic context
 SemanticContext* semantic_create(void) {
@@ -13,6 +29,14 @@ SemanticContext* semantic_create(void) {
     
     context->symbol_table = symbol_table_create();
     if (!context->symbol_table) {
+        free(context);
+        return NULL;
+    }
+    
+    // Initialize type inference system
+    context->type_inference = type_inference_create();
+    if (!context->type_inference) {
+        symbol_table_destroy(context->symbol_table);
         free(context);
         return NULL;
     }
@@ -34,6 +58,17 @@ void semantic_destroy(SemanticContext* context) {
     symbol_table_destroy(context->symbol_table);
     semantic_error_destroy(context->errors);
     free(context->current_filename);
+    
+    // Destroy import context
+    if (context->import_context) {
+        import_context_destroy(context->import_context);
+    }
+    
+    // Destroy type inference context
+    if (context->type_inference) {
+        type_inference_destroy(context->type_inference);
+    }
+    
     free(context);
 }
 
@@ -110,6 +145,12 @@ bool semantic_analyze(SemanticContext* context, ASTNode* ast) {
     
     if (success && context->error_count == 0) {
         printf("✓ Semantic analysis completed successfully!\n");
+        
+        // Print type inference statistics
+        if (context->type_inference) {
+            type_inference_print_instantiations(context->type_inference);
+        }
+        
         return true;
     } else {
         printf("✗ Semantic analysis failed with %d errors\n", context->error_count);
@@ -123,10 +164,44 @@ bool semantic_analyze_program(SemanticContext* context, ASTNode* node) {
     
     bool success = true;
     
-    // First pass: collect all function declarations
+    // First pass: process #include directives
     for (int i = 0; i < node->child_count; i++) {
         ASTNode* child = node->children[i];
-        if (child->type == AST_FUNCTION) {
+        if (child->type == AST_PREPROCESSOR) {
+            if (context->import_context) {
+                if (!import_process_include(context->import_context, child)) {
+                    printf("Failed to process include: %s\n", child->value);
+                    success = false;
+                }
+            }
+        }
+    }
+    
+    // Second pass: collect and analyze struct declarations
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* child = node->children[i];
+        if (child->type == AST_STRUCT) {
+            // Analyze struct first
+            if (!semantic_analyze_struct(context, child)) {
+                success = false;
+            }
+            
+            // Add struct to global scope as a type
+            Symbol* struct_symbol = symbol_create(child->value, SYMBOL_STRUCT, child, NULL);
+            if (!symbol_table_add_symbol(context->symbol_table, struct_symbol)) {
+                semantic_add_error(context, SEMANTIC_ERROR_REDEFINED_SYMBOL, 
+                                 SEMANTIC_SEVERITY_ERROR, child->line, child->column,
+                                 "Struct '%s' already defined", child->value);
+                symbol_destroy(struct_symbol);
+                success = false;
+            }
+        }
+    }
+    
+    // Third pass: collect function declarations
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* child = node->children[i];
+        if (child->type == AST_FUNCTION || child->type == AST_GENERIC_FUNCTION) {
             // Add function to global scope
             Symbol* func_symbol = symbol_create(child->value, SYMBOL_FUNCTION, child, NULL);
             if (!symbol_table_add_symbol(context->symbol_table, func_symbol)) {
@@ -139,16 +214,77 @@ bool semantic_analyze_program(SemanticContext* context, ASTNode* node) {
         }
     }
     
-    // Second pass: analyze function bodies
+    // Fourth pass: analyze function bodies
     for (int i = 0; i < node->child_count; i++) {
         ASTNode* child = node->children[i];
-        if (child->type == AST_FUNCTION) {
+        if (child->type == AST_FUNCTION || child->type == AST_GENERIC_FUNCTION) {
             if (!semantic_analyze_function(context, child)) {
                 success = false;
             }
-        } else if (child->type == AST_PREPROCESSOR) {
-            // Skip preprocessor directives for now
-            continue;
+        }
+    }
+    
+    return success;
+}
+
+// Analyze struct declaration
+bool semantic_analyze_struct(SemanticContext* context, ASTNode* node) {
+    if (!context || !node || node->type != AST_STRUCT) return false;
+    
+    bool success = true;
+    
+    printf("✓ Analyzing struct: %s\n", node->value);
+    
+    // Check all fields in the struct
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* field = node->children[i];
+        if (field->type == AST_VARIABLE_DECL) {
+            // Check if field type is valid
+            if (field->child_count > 0) {
+                ASTNode* field_type = field->children[0];
+                
+                // Rule 1: auto is NOT allowed in struct fields
+                if (field_type->type == AST_AUTO_TYPE) {
+                    semantic_add_error(context, SEMANTIC_ERROR_INVALID_AUTO_USAGE,
+                                     SEMANTIC_SEVERITY_ERROR, field->line, field->column,
+                                     "Auto type is not allowed in struct field '%s'. "
+                                     "Struct fields must have concrete types", field->value);
+                    success = false;
+                    continue;
+                }
+                
+                // Rule 2: Check if field type is a valid concrete type
+                if (field_type->value) {
+                    // Check built-in types
+                    bool is_valid_type = (
+                        strcmp(field_type->value, "i8") == 0 ||
+                        strcmp(field_type->value, "i16") == 0 ||
+                        strcmp(field_type->value, "i32") == 0 ||
+                        strcmp(field_type->value, "i64") == 0 ||
+                        strcmp(field_type->value, "f32") == 0 ||
+                        strcmp(field_type->value, "f64") == 0 ||
+                        strcmp(field_type->value, "bool") == 0 ||
+                        strcmp(field_type->value, "string") == 0 ||
+                        strcmp(field_type->value, "char") == 0
+                    );
+                    
+                    // TODO: Also check user-defined types (other structs)
+                    // For now, assume any non-builtin type might be valid
+                    
+                    if (!is_valid_type) {
+                        // For now, just warn about unknown types
+                        semantic_add_error(context, SEMANTIC_ERROR_UNDEFINED_TYPE,
+                                         SEMANTIC_SEVERITY_WARNING, field->line, field->column,
+                                         "Unknown type '%s' for field '%s'", 
+                                         field_type->value, field->value);
+                    }
+                } else {
+                    semantic_add_error(context, SEMANTIC_ERROR_TYPE_MISMATCH,
+                                     SEMANTIC_SEVERITY_ERROR, field->line, field->column,
+                                     "Field '%s' has no type", field->value);
+                    success = false;
+                }
+            }
         }
     }
     
@@ -157,9 +293,24 @@ bool semantic_analyze_program(SemanticContext* context, ASTNode* node) {
 
 // Analyze function
 bool semantic_analyze_function(SemanticContext* context, ASTNode* node) {
-    if (!context || !node || node->type != AST_FUNCTION) return false;
+    if (!context || !node || (node->type != AST_FUNCTION && node->type != AST_GENERIC_FUNCTION)) return false;
     
     context->current_function = node;
+    
+    // Handle generic functions
+    if (node->type == AST_GENERIC_FUNCTION) {
+        printf("✓ Analyzing generic function: %s\n", node->value);
+        
+        // Analyze generic function for type inference
+        if (!type_inference_analyze_function(context->type_inference, node)) {
+            printf("Failed to analyze generic function for type inference\n");
+            return false;
+        }
+        
+        // For generic functions, we don't analyze the body until instantiation
+        // Just validate the structure
+        return true;
+    }
     
     // Enter function scope
     symbol_table_enter_scope(context->symbol_table, true);
@@ -310,16 +461,65 @@ bool semantic_analyze_variable_decl(SemanticContext* context, ASTNode* node) {
         return false;
     }
     
+    // Handle auto type inference
+    if (type_node->type == AST_AUTO_TYPE && node->child_count > 1) {
+        // Variable has auto type and initializer - infer the type
+        ASTNode* initializer = node->children[1];
+        
+        // IMPORTANT: Analyze expression FIRST to create generic instantiations
+        if (!semantic_analyze_expression(context, initializer)) {
+            return false;
+        }
+        
+        // Now use type inference to determine the actual type
+        if (context->type_inference) {
+            char* inferred_type = type_inference_infer_expression_type_with_symbols(
+                context->type_inference, initializer, context->symbol_table);
+            if (inferred_type) {
+                printf("✓ Inferred type '%s' for variable '%s'\n", inferred_type, node->value);
+                
+                // Create a new concrete type node
+                ASTNode* concrete_type = ast_create_node(AST_TYPE, inferred_type);
+                concrete_type->line = type_node->line;
+                concrete_type->column = type_node->column;
+                
+                // Replace the auto type with the concrete type
+                node->children[0] = concrete_type;
+                ast_destroy(type_node);
+                type_node = concrete_type;
+                
+                free(inferred_type);
+            } else {
+                semantic_add_error(context, SEMANTIC_ERROR_TYPE_MISMATCH,
+                                 SEMANTIC_SEVERITY_ERROR, node->line, node->column,
+                                 "Could not infer type for auto variable '%s'", node->value);
+                return false;
+            }
+        } else {
+            semantic_add_error(context, SEMANTIC_ERROR_TYPE_MISMATCH,
+                             SEMANTIC_SEVERITY_ERROR, node->line, node->column,
+                             "Type inference not available for auto variable '%s'", node->value);
+            return false;
+        }
+    } else if (type_node->type == AST_AUTO_TYPE) {
+        semantic_add_error(context, SEMANTIC_ERROR_TYPE_MISMATCH,
+                         SEMANTIC_SEVERITY_ERROR, node->line, node->column,
+                         "Auto variable '%s' must have an initializer", node->value);
+        return false;
+    }
+    
     // Create symbol
     Symbol* var_symbol = symbol_create(node->value, SYMBOL_VARIABLE, node, type_node);
     
     // Check for initialization
     if (node->child_count > 1) {
         var_symbol->is_initialized = true;
-        // Analyze initialization expression
-        if (!semantic_analyze_expression(context, node->children[1])) {
-            symbol_destroy(var_symbol);
-            return false;
+        // Analyze initialization expression (if not already done for auto inference)
+        if (type_node->type != AST_AUTO_TYPE) {
+            if (!semantic_analyze_expression(context, node->children[1])) {
+                symbol_destroy(var_symbol);
+                return false;
+            }
         }
     }
     
@@ -360,6 +560,42 @@ bool semantic_analyze_expression(SemanticContext* context, ASTNode* node) {
             return true;
         }
         
+        case AST_SCOPE_RESOLUTION: {
+            // Handle module::function syntax
+            if (node->child_count >= 2) {
+                // Build full qualified name (module::submodule::function)
+                char full_name[256] = "";
+                for (int i = 0; i < node->child_count; i++) {
+                    if (i > 0) strcat(full_name, "::");
+                    if (node->children[i]->value) {
+                        strcat(full_name, node->children[i]->value);
+                    }
+                }
+                
+                // Look up the fully qualified symbol
+                Symbol* symbol = symbol_table_lookup(context->symbol_table, full_name);
+                if (!symbol) {
+                    semantic_add_error(context, SEMANTIC_ERROR_UNDEFINED_SYMBOL,
+                                     SEMANTIC_SEVERITY_ERROR, node->line, node->column,
+                                     "Undefined symbol '%s'", full_name);
+                    return false;
+                }
+                
+                return true;
+            }
+            return false;
+        }
+        
+        case AST_MEMBER_ACCESS: {
+            // Handle obj.field and ptr->field syntax with full validation
+            return semantic_validate_member_access(context, node);
+        }
+        
+        case AST_STRUCT_LITERAL: {
+            // Handle struct initialization syntax: {field: value, ...}
+            return semantic_validate_struct_literal(context, node);
+        }
+        
         case AST_CALL:
             return semantic_validate_function_call(context, node);
             
@@ -395,31 +631,48 @@ bool semantic_validate_function_call(SemanticContext* context, ASTNode* call) {
     if (call->child_count == 0) return false;
     
     ASTNode* callee = call->children[0];
-    if (callee->type != AST_IDENTIFIER) {
-        // For now, only support simple function calls
-        return semantic_analyze_expression(context, callee);
-    }
     
-    // Look up function
-    Symbol* func_symbol = symbol_table_lookup(context->symbol_table, callee->value);
-    if (!func_symbol) {
-        semantic_add_error(context, SEMANTIC_ERROR_UNDEFINED_FUNCTION,
-                         SEMANTIC_SEVERITY_ERROR, call->line, call->column,
-                         "Undefined function '%s'", callee->value);
+    // For now, just analyze the callee expression
+    // The import system will have already added the correct symbols
+    if (!semantic_analyze_expression(context, callee)) {
         return false;
     }
     
-    if (func_symbol->type != SYMBOL_FUNCTION) {
-        semantic_add_error(context, SEMANTIC_ERROR_TYPE_MISMATCH,
-                         SEMANTIC_SEVERITY_ERROR, call->line, call->column,
-                         "'%s' is not a function", callee->value);
-        return false;
+    // Look up the function being called
+    Symbol* func_symbol = NULL;
+    if (callee->type == AST_IDENTIFIER) {
+        func_symbol = symbol_table_lookup(context->symbol_table, callee->value);
+    } else if (callee->type == AST_SCOPE_RESOLUTION) {
+        // Handle qualified function calls like io::print
+        // For now, just look up by the full qualified name
+        if (callee->child_count >= 2) {
+            ASTNode* func_name = callee->children[callee->child_count - 1];
+            if (func_name->type == AST_IDENTIFIER) {
+                func_symbol = symbol_table_lookup(context->symbol_table, func_name->value);
+            }
+        }
     }
     
     // Analyze arguments
     bool success = true;
     for (int i = 1; i < call->child_count; i++) {
         if (!semantic_analyze_expression(context, call->children[i])) {
+            success = false;
+        }
+    }
+    
+    // Handle generic function calls
+    if (func_symbol && func_symbol->ast_node && 
+        func_symbol->ast_node->type == AST_GENERIC_FUNCTION) {
+        
+        printf("✓ Found call to generic function: %s\n", func_symbol->name);
+        
+        // Perform type inference for this call
+        if (!type_inference_infer_call(context->type_inference, call, func_symbol->ast_node, context->symbol_table)) {
+            semantic_add_error(context, SEMANTIC_ERROR_TYPE_MISMATCH,
+                             SEMANTIC_SEVERITY_ERROR, call->line, call->column,
+                             "Failed to infer types for generic function call '%s'", 
+                             func_symbol->name);
             success = false;
         }
     }
@@ -437,10 +690,58 @@ bool semantic_check_types_compatible(ASTNode* type1, ASTNode* type2) {
 }
 
 ASTNode* semantic_get_expression_type(SemanticContext* context, ASTNode* expr) {
-    // TODO: Implement type inference
-    (void)context;
-    (void)expr;
-    return NULL;
+    if (!context || !expr) return NULL;
+    
+    switch (expr->type) {
+        case AST_IDENTIFIER: {
+            // Look up symbol and return its type
+            Symbol* symbol = symbol_table_lookup(context->symbol_table, expr->value);
+            if (symbol && symbol->type_node) {
+                return symbol->type_node;
+            }
+            return NULL;
+        }
+        
+        case AST_LITERAL: {
+            // Create type node based on literal type
+            if (expr->data_type) {
+                ASTNode* type_node = malloc(sizeof(ASTNode));
+                if (type_node) {
+                    type_node->type = AST_TYPE;
+                    type_node->value = strdup(expr->data_type);
+                    type_node->child_count = 0;
+                    type_node->children = NULL;
+                    type_node->line = expr->line;
+                    type_node->column = expr->column;
+                    type_node->data_type = NULL;
+                    return type_node;
+                }
+            }
+            return NULL;
+        }
+        
+        case AST_MEMBER_ACCESS: {
+            // Get the type of obj.field
+            if (expr->child_count < 2) return NULL;
+            
+            ASTNode* obj_expr = expr->children[0];
+            ASTNode* field_expr = expr->children[1];
+            
+            // Get the type of the object
+            ASTNode* obj_type = semantic_get_expression_type(context, obj_expr);
+            if (!obj_type || !obj_type->value) return NULL;
+            
+            // Find the struct declaration
+            Symbol* struct_symbol = symbol_table_lookup(context->symbol_table, obj_type->value);
+            if (!struct_symbol || struct_symbol->type != SYMBOL_STRUCT) return NULL;
+            
+            // Get the field type from struct declaration
+            return semantic_get_struct_field_type(struct_symbol->declaration, field_expr->value);
+        }
+        
+        default:
+            return NULL;
+    }
 }
 
 bool semantic_validate_assignment(SemanticContext* context, ASTNode* lhs, ASTNode* rhs) {
@@ -470,4 +771,123 @@ bool semantic_check_memory_management(SemanticContext* context, ASTNode* node) {
     (void)context;
     (void)node;
     return true;
+}
+
+// Check if struct has a specific field
+bool semantic_struct_has_field(ASTNode* struct_decl, const char* field_name) {
+    if (!struct_decl || struct_decl->type != AST_STRUCT || !field_name) {
+        return false;
+    }
+    
+    // Check all fields in the struct
+    for (int i = 0; i < struct_decl->child_count; i++) {
+        ASTNode* field = struct_decl->children[i];
+        if (field->type == AST_VARIABLE_DECL && field->value) {
+            if (strcmp(field->value, field_name) == 0) {
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+// Get the type of a specific field in a struct
+ASTNode* semantic_get_struct_field_type(ASTNode* struct_decl, const char* field_name) {
+    if (!struct_decl || struct_decl->type != AST_STRUCT || !field_name) {
+        return NULL;
+    }
+    
+    // Find the field and return its type
+    for (int i = 0; i < struct_decl->child_count; i++) {
+        ASTNode* field = struct_decl->children[i];
+        if (field->type == AST_VARIABLE_DECL && field->value) {
+            if (strcmp(field->value, field_name) == 0) {
+                // Return the type node (first child of variable declaration)
+                if (field->child_count > 0) {
+                    return field->children[0];
+                }
+            }
+        }
+    }
+    
+    return NULL;
+}
+
+// Validate member access expressions
+bool semantic_validate_member_access(SemanticContext* context, ASTNode* member_access) {
+    if (!context || !member_access || member_access->type != AST_MEMBER_ACCESS) {
+        return false;
+    }
+    
+    if (member_access->child_count < 2) {
+        semantic_add_error(context, SEMANTIC_ERROR_INVALID_OPERATION,
+                         SEMANTIC_SEVERITY_ERROR, member_access->line, member_access->column,
+                         "Invalid member access expression");
+        return false;
+    }
+    
+    ASTNode* obj_expr = member_access->children[0];
+    ASTNode* field_expr = member_access->children[1];
+    
+    // Analyze the object expression first
+    if (!semantic_analyze_expression(context, obj_expr)) {
+        return false;
+    }
+    
+    // Get the type of the object
+    ASTNode* obj_type = semantic_get_expression_type(context, obj_expr);
+    if (!obj_type || !obj_type->value) {
+        semantic_add_error(context, SEMANTIC_ERROR_TYPE_MISMATCH,
+                         SEMANTIC_SEVERITY_ERROR, member_access->line, member_access->column,
+                         "Cannot determine type of object in member access");
+        return false;
+    }
+    
+    // Find the struct declaration
+    Symbol* struct_symbol = symbol_table_lookup(context->symbol_table, obj_type->value);
+    if (!struct_symbol || struct_symbol->type != SYMBOL_STRUCT) {
+        semantic_add_error(context, SEMANTIC_ERROR_TYPE_MISMATCH,
+                         SEMANTIC_SEVERITY_ERROR, member_access->line, member_access->column,
+                         "Member access on non-struct type '%s'", obj_type->value);
+        return false;
+    }
+    
+    // Check if the field exists in the struct
+    if (!semantic_struct_has_field(struct_symbol->declaration, field_expr->value)) {
+        semantic_add_error(context, SEMANTIC_ERROR_UNDEFINED_FIELD,
+                         SEMANTIC_SEVERITY_ERROR, member_access->line, member_access->column,
+                         "Struct '%s' has no field named '%s'", obj_type->value, field_expr->value);
+        return false;
+    }
+    
+    return true;
+}
+
+// Validate struct literal expressions
+bool semantic_validate_struct_literal(SemanticContext* context, ASTNode* struct_literal) {
+    if (!context || !struct_literal || struct_literal->type != AST_STRUCT_LITERAL) {
+        return false;
+    }
+    
+    // For now, just validate that all field values are valid expressions
+    // In a full implementation, we would:
+    // 1. Determine the target struct type from context
+    // 2. Check that all required fields are initialized
+    // 3. Check that no unknown fields are provided
+    // 4. Validate field value types match field declarations
+    
+    bool success = true;
+    for (int i = 0; i < struct_literal->child_count; i++) {
+        ASTNode* field_init = struct_literal->children[i];
+        if (field_init->type == AST_ASSIGNMENT && field_init->child_count >= 2) {
+            // Validate the field value expression
+            ASTNode* field_value = field_init->children[1];
+            if (!semantic_analyze_expression(context, field_value)) {
+                success = false;
+            }
+        }
+    }
+    
+    return success;
 } 

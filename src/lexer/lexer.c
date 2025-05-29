@@ -94,11 +94,11 @@ bool is_whitespace(char c) {
 }
 
 bool is_operator_char(char c) {
-    return strchr("+-*/%=!<>&|^~?:", c) != NULL;
+    return strchr("+-*/%=!<>&|^~?:.-", c) != NULL;
 }
 
 bool is_delimiter_char(char c) {
-    return strchr("(){}[];,.", c) != NULL;
+    return strchr("(){}[];,", c) != NULL;
 }
 
 // Skip whitespace
